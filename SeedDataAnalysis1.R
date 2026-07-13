@@ -51,8 +51,8 @@
   #set working directory
   setwd(here())
   #Import data
-    WideCounts <- read_excel(here("All_Data_Seeds-7_26.xlsx"), sheet = "COUNTS")
-    WideWeights <- read_excel(here("All_Data_Seeds-7_26.xlsx"), sheet = "WEIGHTS")
+    WideCounts <- read_excel(here("Data/All_Data_Seeds-7_26.xlsx"), sheet = "COUNTS")
+    WideWeights <- read_excel(here("Data/All_Data_Seeds-7_26.xlsx"), sheet = "WEIGHTS")
     
   #Add column combining Site and Quad
     WideCounts$SiteQuad <- paste(WideCounts$Site, WideCounts$Quad, sep = "_")
