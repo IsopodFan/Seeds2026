@@ -50,6 +50,8 @@
 #Import, prep data
   #set working directory
   setwd(here())
+  
+  ##1.1: Seeds Data ------------------------------------------------------------
   #Import data
     WideCounts <- read_excel(here("Data/All_Data_Seeds-7_26.xlsx"), sheet = "COUNTS")
     WideWeights <- read_excel(here("Data/All_Data_Seeds-7_26.xlsx"), sheet = "WEIGHTS")
@@ -82,7 +84,9 @@
     #expand counts 
     ExpCounts <- uncount(LongCounts, weights = Count)
     
-    
+  ##1.2: Canopy Loss Data 
+    #import data
+    CanopyLoss <- read_excel(here("Data/Canopy_Loss.xlsx"), sheet = "merged")
 
 #SECTION 2: Goofin' around -----------------------------------------------------
     
@@ -199,4 +203,6 @@ ggplot(WC.div.avg, aes(x = Set, y = avg_div)) +
     
     write.xlsx(comm_matrix, here("comm_matrix.xlsx")) 
     
-    
+
+#SECTION 3: Trying to do Beta-Analysis
+  
