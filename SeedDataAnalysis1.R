@@ -383,6 +383,32 @@ ggplot(WC.div.avg, aes(x = Set, y = avg_div)) +
       x = "Average Canopy Loss (%)", 
       y = "Pairwise Beta-Diversity (Bray-Curtis Dissimilarity)"
     )
+  
+  NMDS_ord <- read_excel(here("Data/NMDS_ordination.xlsx"))
+  
+  View(CanopyLoss)
+  
+  NMDSxCLoss.df <- data.frame(
+    nmds1 = NMDS_ord$nmds1, 
+    nmds2 = NMDS_ord$nmds2,
+    PercentLost = CanopyLoss$Percent_Lost
+  )  
+  
+  NMDS1vsCLoss.plot <-  ggplot(NMDSxCLoss.df, aes(x = PercentLost, y = nmds1)) + 
+    geom_point() + 
+    geom_smooth(method = "lm", se = FALSE) +
+    labs(
+      x = "Canopy Loss (%)", 
+      y = "NMDS1"
+    )
+  
+  NMDS2vsCLoss.plot <-  ggplot(NMDSxCLoss.df, aes(x = PercentLost, y = nmds2)) + 
+    geom_point() + 
+    geom_smooth(method = "lm", se = FALSE) +
+    labs(
+      x = "Canopy Loss (%)", 
+      y = "NMDS2"
+    )
     
     
     
