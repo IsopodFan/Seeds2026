@@ -294,37 +294,95 @@ ggplot(WC.div.avg, aes(x = Set, y = avg_div)) +
     
   ##3.2: get delta in canopy cover for every pair of subplots ------------------
     
-    CanopyLoss <- CanopyLoss |> 
-    rename(Percent_Lost = `canopy loss`) |> 
+    CanopyLoss <- CanopyLoss                  |> 
+    rename(Percent_Lost = `canopy loss`)      |> 
     select(Percent_Lost, Site, Plot, Subplot) |> 
     mutate(SitePlot = paste(Site, Plot, sep = "_"))
   
-    pairwise_canopy <- CanopyLoss |> 
-      rename(subplot1 = Subplot, canopy_loss1 = Percent_Lost) |> 
+    pairwise_canopy <- CanopyLoss                |> 
+      rename(subplot1     = Subplot, 
+             canopy_loss1 = Percent_Lost)        |> 
       inner_join(
-        CanopyLoss |> rename(subplot2 = Subplot, canopy_loss2 = Percent_Lost),
+        CanopyLoss                               |> 
+          rename(subplot2     = Subplot, 
+                 canopy_loss2 = Percent_Lost),
         by = "SitePlot"
-      ) |> 
-      filter(subplot1 < subplot2) |> 
+      )                                          |> 
+      filter(subplot1 < subplot2)                |> 
       mutate(diff = canopy_loss1 - canopy_loss2) |> 
-      select(SitePlot, subplot1, subplot2, canopy_loss1, canopy_loss2, diff) |> 
+      select(SitePlot, subplot1, subplot2, 
+             canopy_loss1, canopy_loss2, diff)   |> 
       mutate(diff = abs(diff))
   
-    join_canopy <- pairwise_canopy |> 
+    join_canopy <- pairwise_canopy                            |> 
       mutate(plot_pair = paste(subplot1, subplot2, sep = "")) |> 
       select(SitePlot, plot_pair, diff)
   
-  ##3.3: add canopy diff data to beta data
+  ##3.3: add canopy diff data to beta data -------------------------------------
       All_Pairs <- pairwise_beta_results |> 
         mutate(canopy_diff = pairwise_canopy$diff)
     
-  ggplot(All_Pairs, aes(x = bray_curtis, y = canopy_diff)) + 
-    geom_point()
+  ByPairDiff.plot <-  ggplot(All_Pairs, aes(x = canopy_diff, y = bray_curtis)) + 
+    geom_point() + 
+    geom_smooth(method = "lm", se = FALSE) +
+    labs(
+      x = "Difference in Canopy Loss (%)", 
+      y = "Pairwise Beta-Diversity (Bray-Curtis Dissimilarity)"
+    )
     
-    
-    
-    
+    View(LCsum)
+ 
+  LCsum <- LCsum |> 
+    mutate(plotsp = paste(plot, subplot, sep = "_")) |> 
+    select(plotsp, species, count)
+       
+  WCsum <- pivot_wider(
+    data        = LCsum, 
+    names_from  = species, 
+    values_from = count, 
+    values_fill = 0
+  ) 
   
+  CanopyLoss <- CanopyLoss |> 
+    mutate(plotsp = paste(SitePlot, Subplot, sep = '_'))
+  
+  WCsum <- WCsum |> 
+    separate(plotsp, into = c("site", "plot", "subplot"), sep = "_", remove = FALSE) |> 
+    mutate(Percent_Loss = CanopyLoss$Percent_Lost) |> 
+    relocate(Percent_Loss, .after = subplot)
+  
+  write.xlsx(WCsum, here("primere_output_1.xlsx")) 
+  
+  ## 3.4: repeat 3.2 but for average canopy loss between the two --------------- 
+  
+  canopy_pavg <- CanopyLoss |> 
+    rename(subplot1     = Subplot, 
+           canopy_loss1 = Percent_Lost)        |> 
+    inner_join(
+      CanopyLoss                               |> 
+        rename(subplot2     = Subplot, 
+               canopy_loss2 = Percent_Lost),
+      by = "SitePlot"
+    )                                          |> 
+    filter(subplot1 < subplot2)                |> 
+    mutate(avg_loss = (canopy_loss1 + canopy_loss2)/2) |> 
+    select(SitePlot, subplot1, subplot2, 
+           canopy_loss1, canopy_loss2, avg_loss)
+  
+  join_canopy <- pairwise_canopy                            |> 
+    mutate(plot_pair = paste(subplot1, subplot2, sep = "")) |> 
+    select(SitePlot, plot_pair, diff)
+    
+  All_Pairs <- pairwise_beta_results |> 
+    mutate(canopy_avg = canopy_pavg$avg_loss)
+    
+  ByPairAverage.plot <-  ggplot(All_Pairs, aes(x = canopy_avg, y = bray_curtis)) + 
+    geom_point() + 
+    geom_smooth(method = "loess", se = FALSE) +
+    labs(
+      x = "Average Canopy Loss (%)", 
+      y = "Pairwise Beta-Diversity (Bray-Curtis Dissimilarity)"
+    )
     
     
     
