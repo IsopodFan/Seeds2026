@@ -81,8 +81,7 @@
     LongCounts$Count <- as.integer(LongCounts$Count)
     #convert NAs in count  
     LongCounts$Count[is.na(LongCounts$Count)] <- 0
-    #expand counts 
-    ExpCounts <- uncount(LongCounts, weights = Count)
+  
     
     LongCounts <- LongCounts |> 
       mutate(SiteQuad = case_when(
@@ -115,6 +114,9 @@
         TRUE ~ SiteQuad
       )) |> 
       filter(!SiteQuad %in% c("TFO_0418", "TFO_0017"))
+    
+    #expand counts 
+    ExpCounts <- uncount(LongCounts, weights = Count)
     
   ##1.2: Canopy Loss Data 
     #import data
@@ -234,7 +236,22 @@ ggplot(WC.div.avg, aes(x = Set, y = avg_div)) +
 #     adonis2(bc_dist ~ SiteQuad * Set, data = meta_clean, by = NULL, permutations = 99)
 #     
 #     write.xlsx(comm_matrix, here("comm_matrix.xlsx")) 
-    
+
+## 2.2: Pie Chart --------------------------------------------------------------
+
+View(LongCounts)
+Pie.df <- ExpCounts |> 
+  mutate(species_lumped = fct_lump_prop(Species, prop = .005, other_level = "Other")) |> 
+  count(species_lumped, name = "Abundance") |> 
+  mutate(pct = (Abundance / sum(Abundance))*100) 
+
+ggplot(Pie.df, aes(x = "", y = Abundance, fill = species_lumped)) +
+  geom_col(width = 1, color = "white") +
+  coord_polar(theta = "y") +
+  theme_void() +
+  labs(title = "Species Abundance", fill = "Species") +
+  geom_text(aes(label = species_lumped), position = position_stack(vjust = 0.5), size = 3)
+  
 
 #SECTION 3: Beta-Analysis and Canopy Cover -------------------------------------
   ##3.1: get pairwise beta between all subplots --------------------------------
@@ -383,6 +400,9 @@ ggplot(WC.div.avg, aes(x = Set, y = avg_div)) +
       x = "Average Canopy Loss (%)", 
       y = "Pairwise Beta-Diversity (Bray-Curtis Dissimilarity)"
     )
+ 
+  
+  ##3.4: using NMDS as beta-diversity ------------------------------------------
   
   NMDS_ord <- read_excel(here("Data/NMDS_ordination.xlsx"))
   
@@ -396,21 +416,69 @@ ggplot(WC.div.avg, aes(x = Set, y = avg_div)) +
   
   NMDS1vsCLoss.plot <-  ggplot(NMDSxCLoss.df, aes(x = PercentLost, y = nmds1)) + 
     geom_point() + 
-    geom_smooth(method = "lm", se = FALSE) +
+    geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = FALSE) +
     labs(
       x = "Canopy Loss (%)", 
-      y = "NMDS1"
-    )
+      y = "Beta-Diversity (NMDS1)"
+    ) + 
+    theme_minimal()
   
   NMDS2vsCLoss.plot <-  ggplot(NMDSxCLoss.df, aes(x = PercentLost, y = nmds2)) + 
     geom_point() + 
-    geom_smooth(method = "lm", se = FALSE) +
+    geom_smooth(method = "lm", formula = y ~ poly(x, 3), se = FALSE) +
     labs(
       x = "Canopy Loss (%)", 
-      y = "NMDS2"
+      y = "Beta-Diversity (NMDS2)"
     )
-    
-    
-    
-    
+   
+  #AIC?
+  
+  x <-  NMDSxCLoss.df$PercentLost
+  y <- NMDSxCLoss.df$nmds2
+  
+  linear    <- lm(y ~ x)
+  quadratic <- lm(y ~ x + I(x^2))
+  cubic     <- lm(y ~ x + I(x^2) + I(x^3))
+  poly_fit  <- lm(y ~ poly(x, 4))
+  AIC(linear, quadratic, cubic, poly_fit) 
+  
+  
+  ##3.6: alpha-diversity 
+  ExpComm <- ExpCounts |> 
+    mutate(SQP = paste(SiteQuad, Plot, sep = "_")) |> 
+    select(SQP, Species) |> 
+    count(SQP, Species) |> 
+    pivot_wider(names_from = Species, values_from = n, values_fill = 0) |>
+    column_to_rownames("SQP")
+  
+  ShannonExp <- data.frame(
+    plot = rownames(ExpComm), 
+    shannon = diversity(ExpComm, index = "shannon")
+  )
+  
+  ShannonExp <- ShannonExp |> 
+    mutate(Percent_Lost = CanopyLoss$Percent_Lost)
+  
+  AlpDiv.plot <- ggplot(ShannonExp, aes(x = Percent_Lost, y = shannon)) + 
+    geom_point() + 
+    geom_smooth(method = "lm", formula = y ~ poly(x, 3), se = FALSE) +
+    labs(
+      x = "Canopy Loss (%)", 
+      y = "alpha-diversity (shannon)"
+    ) + 
+    theme_minimal()
+  
+  #AIC
+  
+  x <-  ShannonExp$Percent_Lost
+  y <- ShannonExp$shannon
+  
+  linear    <- lm(y ~ x)
+  quadratic <- lm(y ~ x + I(x^2))
+  cubic     <- lm(y ~ x + I(x^2) + I(x^3))
+  poly_fit  <- lm(y ~ poly(x, 4))
+  AIC(linear, quadratic, cubic, poly_fit) 
+  
+
+  
     
