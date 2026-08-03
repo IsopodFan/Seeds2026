@@ -242,15 +242,46 @@ ggplot(WC.div.avg, aes(x = Set, y = avg_div)) +
 View(LongCounts)
 Pie.df <- ExpCounts |> 
   mutate(species_lumped = fct_lump_prop(Species, prop = .005, other_level = "Other")) |> 
-  count(species_lumped, name = "Abundance") |> 
-  mutate(pct = (Abundance / sum(Abundance))*100) 
+  count(species_lumped, name = "Abundance") %>%
+  bind_rows(
+    filter(., species_lumped %in% c("Rosaceae-1_count", "Rosaceae_sp._count")) |> 
+      summarise(species_lumped = "Rosaceae_sp", across(where(is.numeric), sum))
+  ) %>% 
+  bind_rows(
+    filter(., species_lumped %in% c("Rubus_bifrons_count", "Rubus_sp._count", "Rubus_phoenicolasius_count")) |> 
+      summarise(species_lumped = "Rubus_sp", across(where(is.numeric), sum))
+  ) |> 
+  filter(!species_lumped %in% c("Rubus_sp._count", 
+                                "Rubus_phoenicolasius_count", 
+                                "Rubus_bifrons_count", 
+                                "Rosaceae-1_count", 
+                                "Rosaceae_sp._count")) |>
+  mutate(pct = round((Abundance / sum(Abundance))*100, 3)) |> 
+  mutate(species_pct = paste(species_lumped, pct, sep = "_")) |> 
+  arrange(desc(pct)) %>%
+  { bind_rows(filter(., species_pct != "Other_7.295"), filter(., species_pct == "Other_7.295")) } |> 
+  mutate(species_pct = factor(species_pct, levels = species_pct))
 
-ggplot(Pie.df, aes(x = "", y = Abundance, fill = species_lumped)) +
-  geom_col(width = 1, color = "white") +
-  coord_polar(theta = "y") +
-  theme_void() +
-  labs(title = "Species Abundance", fill = "Species") +
-  geom_text(aes(label = species_lumped), position = position_stack(vjust = 0.5), size = 3)
+  
+
+  pie.plot <- ggplot(Pie.df, aes(x = "", y = Abundance, fill = species_pct)) +
+    geom_col(width = 1, color = "white") +
+    coord_polar(theta = "y") +
+    scale_fill_manual(values = c(
+      "#902A02",
+      "#F6873F",
+      "#C7A897", 
+      "#893345", 
+      "#5c3f20", 
+      "#3a130A",
+      "#b5543c",
+      "#da8437", 
+      "#ae2b3c",
+      "#643744"
+    )) +
+    theme_void() +
+    labs(title = "Proportional Species Abdundance", fill = "Species") #+
+    #geom_text(aes(label = species_lumped), position = position_stack(vjust = 0.5), size = 3) 
   
 
 #SECTION 3: Beta-Analysis and Canopy Cover -------------------------------------
@@ -419,9 +450,16 @@ ggplot(Pie.df, aes(x = "", y = Abundance, fill = species_lumped)) +
     geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = FALSE) +
     labs(
       x = "Canopy Loss (%)", 
-      y = "Beta-Diversity (NMDS1)"
+      y = "Beta-Diversity (NMDS1)", 
+      title = "Canopy Loss (%) vs Beta-Diversity"
     ) + 
     theme_minimal()
+  
+  summary(lm(NMDSxCLoss.df$nmds1 ~ poly(NMDSxCLoss.df$PercentLost, 2)))
+  #r2 = 0.6671
+  #p < 2.2 x 10^-16
+  
+  
   
   NMDS2vsCLoss.plot <-  ggplot(NMDSxCLoss.df, aes(x = PercentLost, y = nmds2)) + 
     geom_point() + 
@@ -461,12 +499,19 @@ ggplot(Pie.df, aes(x = "", y = Abundance, fill = species_lumped)) +
   
   AlpDiv.plot <- ggplot(ShannonExp, aes(x = Percent_Lost, y = shannon)) + 
     geom_point() + 
-    geom_smooth(method = "lm", formula = y ~ poly(x, 3), se = FALSE) +
+    geom_smooth(method = "lm", se = FALSE) +
     labs(
       x = "Canopy Loss (%)", 
-      y = "alpha-diversity (shannon)"
+      y = "Individual Subplot Alpha-Diversity (shannon)",
+      title = "Canopy Loss (%) vs Subplot Alpha-Diversity"
     ) + 
-    theme_minimal()
+    theme_minimal() 
+  
+  summary(lm(ShannonExp$shannon ~ ShannonExp$Percent_Lost))
+  #r2 = .0026
+  #p = .25
+  
+  
   
   #AIC
   
@@ -479,6 +524,34 @@ ggplot(Pie.df, aes(x = "", y = Abundance, fill = species_lumped)) +
   poly_fit  <- lm(y ~ poly(x, 4))
   AIC(linear, quadratic, cubic, poly_fit) 
   
+#SECTION 4: Alpha-div Over Time ------------------------------------------------ 
 
+  Alp.df <- ExpCounts |> 
+    mutate(SQP = paste(SiteQuad, Plot, sep = "_")) |> 
+    mutate(Jday = as.numeric(difftime(as.Date(ExpCounts$Date_Collected), 
+                                      as.Date("2023-01-01"), units = "days"))) |> 
+    filter(Jday < 1000) |> 
+    select(SQP, Jday, Species) |>
+    count(SQP, Jday, Species) |>
+    pivot_wider(names_from = Species, values_from = n, values_fill = 0)
+    
+  Alp.df <- data.frame(
+    plot = Alp.df$SQP, 
+    Jday = Alp.df$Jday,
+    shannon = diversity(Alp.df[3:25], index = "shannon")
+  )
   
+  AlpOverTime.plot <- ggplot(Alp.df, aes(x = Jday, y = shannon)) + 
+    geom_point() + 
+    geom_smooth(method = "lm", se = FALSE) +
+    labs(
+      x = "Days Since January 1st, 2023", 
+      y = "Individual Subplot Alpha-Diversity (shannon)",
+      title = "Subplot Alpha-Diversity Over Time"
+    ) + 
+    theme_minimal() 
+  
+  summary(lm(Alp.df$shannon ~ Alp.df$Jday))
+  #r2 = .02531 
+  #p < 2.2 x 10^16
     
