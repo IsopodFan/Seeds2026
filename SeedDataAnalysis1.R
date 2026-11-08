@@ -1,29 +1,6 @@
 
 #SECTION 1: Import, Clean, and Prep Data ---------------------------------------
 
-#Install packages
-  install.packages('tidyverse')
-  install.packages('vegan')
-  install.packages('ggplot2')
-  install.packages('dplyr')
-  install.packages('ggridges') 
-  install.packages('readxl')
-  install.packages("hrbrthemes")
-  install.packages("systemfonts")
-  install.packages("gridExtra")
-  install.packages("grid")
-  install.packages("abind")
-  install.packages("here") 
-  install.packages("openxlsx")
-  install.packages("tictoc")
-  install.packages("lme4")
-  install.packages("lmerTest") 
-  install.packages("emmeans") 
-  install.packages("pbkrtest")
-  install.packages("viridis") 
-  install.packages("reshape2")
-  install.packages("betapart")
-
 #call packages
   library(tidyverse)
   library(vegan)
@@ -32,7 +9,6 @@
   library(ggridges) 
   library(readxl) 
   library(systemfonts)
-  #library(hrbrthemes)
   library(gridExtra)
   library(grid)
   library(abind) 
@@ -46,6 +22,8 @@
   library(viridis)
   library(reshape2)
   library(betapart)
+  library(adespatial)
+  library(mgcv)
 
 #Import, prep data
   #set working directory
@@ -554,4 +532,261 @@ Pie.df <- ExpCounts |>
   summary(lm(Alp.df$shannon ~ Alp.df$Jday))
   #r2 = .02531 
   #p < 2.2 x 10^16
+  
+#SECTION 5: fuckin around and vibe coding while procrastinating ------------------------------------------
+  
+## 5.1: Long Counts to subplot x species matrix ---------------------------------
+ 
+# check to be sure all the subplots are labelled correctly
+stopifnot(all(grepl("^(RBP|TFO)_[0-9]{4}$", LongCounts$SiteQuad)))
+  
+# create key column 
+  LongCounts <- LongCounts |> 
+    mutate( 
+      key = paste(SiteQuad, Plot, sep = "_")
+      )
+  
+# take only the species columns 
+  sp_cols <- names(WideCounts)[match("Acer_platanoides_count", names(WideCounts)):
+                                 match("Helianthus_annus_count", names(WideCounts))]
+  
+# separate herbaceous from woody for later analysis 
+  herb_start <- match("Herbaceous_seed_non-focal", sp_cols)
+  woody_cols <- sp_cols[seq_len(herb_start - 1)]
+  herb_cols  <- sp_cols[herb_start:length(sp_cols)]
+  cat("woody:", length(woody_cols), "| herbaceous:", length(herb_cols), "\n")
+  
+# summarize across all collections to give one row per subplot, one column per species 
+  sp_mat <- LongCounts |> 
+    group_by(key, Species) |> 
+    summarise(Count = sum(Count), .groups = "drop") |> 
+    pivot_wider(names_from  = Species, 
+                values_from = Count, 
+                values_fill = 0)
+  
+## 5.2: Canopy Loss and Merge --------------------------------------------------
+  
+  # make canopy formatting match seed data
+  canopy <- CanopyLoss |> 
+    mutate(
+      Plot        = str_pad(as.character(Plot), 4, pad = "0"), 
+      key         = paste(Site, Plot, Subplot, sep = "_"), 
+      canopy_loss = as.numeric(`canopy loss`), 
+      plot_id     = paste(Site, Plot, sep = "_")
+    )
+  
+  # join seed data and canopy data
+  dat <- inner_join(canopy, sp_mat, by = "key") 
+  cat("merged rows:", nrow(dat), "(expect 120)\n")
+  print(anti_join(canopy, sp_mat, by = "key")$key)   #needs to be empty 
+  
+  # add canopy loss buckets 
+  
+  dat <- dat |>
+    mutate(class   = cut(canopy_loss, c(-Inf, 10, 20, 30, Inf),
+                         labels = c("0-10", "10-20", "20-30", "30+")),
+           plot_id = factor(plot_id),
+           Site    = factor(Site))
+  
+  ## 5.3: Analysis Function ---------------------------------------------------- 
+  
+  run_analysis <- function(d, cols, label, trans = sqrt) {
+    
+    ## output: 
+      # Mean distance to centroid for each canopy loss class 
+      # permutation test to see if spreads differ 
+      # tukeyHSD test for which sets of classes differ 
+      # spearman tests - negative rho means the subplots at higher loss are closer 
+        # to center and contribute less to unique comp 
+      # mean pairwise BC betadiv within class, scaled from 0 to 1
+      # NMDS block
+    
+    
+    
+    cat("\n=====", label, "=====\n")
+    Y <- as.matrix(d[, cols]); rownames(Y) <- d$key
+    keep <- rowSums(Y) > 0 
+    Y <- Y[keep, , drop = FALSE]; d <- d[keep, ]
+    cls <- droplevels(d$class)
+    pid <- droplevels(d$plot_id)
+    
+    bc <- vegdist(trans(Y), method = "bray")
+    
+    # (A) dispersion by canopy class 
+    bd <- betadisper(bc, cls, type = "centroid") 
+    cat("Mean distance to class centroid: \n"); 
+    print(round(tapply(bd$distances, cls, mean), 3))
+    
+    ## permute whole plots because canopy loss is not independent between them 
+    
+    ctrl <- how(
+      nperm  = 9999, 
+      plots  = Plots(strata = pid, type = "free"), 
+      within = Within(type = "none")
+    )
+    print(permutest(bd, permutations = ctrl))
+    print(TukeyHSD(bd))
+    
+    # (B) continuous measures 
+    
+    d$dist_global <- betadisper(bc, factor(rep("all", nrow(Y))))$distances
+    d$LCBD <- beta.div(Y, method = "hellinger", nperm = 999)$LCBD
+    print(cor.test(d$canopy_loss, d$dist_global, method = "spearman", exact = FALSE))
+    print(cor.test(d$canopy_loss, d$LCBD,        method = "spearman", exact = FALSE))
+    
+    ## (C) mean pairwise Bray-Curtis within each class (direct beta diversity)
+    bcm <- as.matrix(bc)
+    pw  <- sapply(levels(cls), function(k) {
+      i <- which(cls == k)
+      if (length(i) < 3) return(NA_real_)
+      m <- bcm[i, i]; mean(m[lower.tri(m)])
+    })
+    cat("Mean pairwise BC within class:\n"); print(round(pw, 3))
+    
+    ## (D) NMDS, to check what Figure 4's NMDS1 actually captures
+    nm <- metaMDS(bc, k = 2, trymax = 50, trace = 0)
+    d$NMDS1 <- nm$points[, 1]; d$NMDS2 <- nm$points[, 2]
+    cat("NMDS stress:", round(nm$stress, 3), "\n")
+    cat("Spearman NMDS1~canopy:", round(cor(d$canopy_loss, d$NMDS1, method = "spearman"), 2),
+        "| NMDS2~canopy:", round(cor(d$canopy_loss, d$NMDS2, method = "spearman"), 2), "\n")
+    cat("SD of NMDS1 by class:\n"); print(round(tapply(d$NMDS1, cls, sd), 3))
+    
+    invisible(list(data = d, bc = bc, bd = bd))
+  }
+  
+## 5.4: Run the function ------------------------------------------------------- 
+  res_woody <- run_analysis(dat, woody_cols, "WOODY, all sites")
+  res_herb  <- run_analysis(dat, herb_cols,  "HERBACEOUS (unknowns excluded), all sites")
+  res_all <- run_analysis(dat, c(woody_cols, herb_cols), "All species")
+  
+
+## 5.5: Confound checks -------------------------------------------------------- 
+  # I'm tired of typing this out
+
+  Yw <- as.matrix(dat[, woody_cols])
+  dat$total_woody    <- rowSums(Yw)
+  dat$richness_woody <- rowSums(Yw > 0)
+  print(dat %>% group_by(class) %>%
+          summarise(n = n(), seeds = mean(total_woody), richness = mean(richness_woody)))
+  
+  ## Presence/absence: if dispersion is flat here but not with abundances,
+  ## the pattern is driven by abundance, not species turnover
+  bc_pa <- vegdist(Yw > 0, method = "jaccard", binary = TRUE)
+  bd_pa <- betadisper(bc_pa, dat$class, type = "centroid")
+  cat("\nJaccard (presence/absence) distance to centroid:\n")
+  print(round(tapply(bd_pa$distances, dat$class, mean), 3))
+  
+  
+## 5.6: Modelling continuous gradient ------------------------------------------ 
+  
+  tab <- res_woody$data
+  tab$plot_id <- factor(tab$plot_id)
+  m1 <- mgcv::gam(dist_global ~ s(canopy_loss, k = 5) + Site + s(plot_id, bs = "re"),
+            data = tab, method = "REML")
+  summary(m1)       # plot random effect handles subplots nested in plots
+  m2 <- mgcv::gam(LCBD ~ s(canopy_loss, k = 5) + Site + s(plot_id, bs = "re"),
+            data = tab, method = "REML")
+  summary(m2)
+  
+  ## PERMANOVA for centroid shifts (report alongside betadisper)
+  bc_w <- res_woody$bc
+  ctrl <- how(nperm = 9999, plots = Plots(strata = tab$plot_id, type = "free"),
+              within = Within(type = "none"))
+  adonis2(bc_w ~ Site + canopy_loss, data = tab, permutations = ctrl, by = "terms")
+  
+## 5.7: Figures ---------------------------------------------------------------- 
+  
+  p1 <- ggplot(tab, aes(canopy_loss, dist_global, colour = Site)) +
+    geom_point(alpha = .7) +
+    geom_smooth(aes(group = 1), method = "gam", formula = y ~ s(x, k = 5), colour = "black") +
+    labs(x = "Canopy loss (%)", y = "Distance to centroid (Bray-Curtis, sqrt counts)") +
+    theme_classic()
+  #ggsave("fig_dispersion_vs_canopy.png", p1, width = 6, height = 4, dpi = 300)
+  
+  p2 <- ggplot(tab, aes(class, dist_global)) +
+    geom_boxplot(outlier.shape = NA) + geom_jitter(aes(colour = Site), width = .15, alpha = .6) +
+    labs(x = "Canopy loss class (%)", y = "Distance to centroid") + theme_classic()
+  #ggsave("fig_centroid_boxplot.png", p2, width = 6, height = 4, dpi = 300)
+  
+  p3 <- ggplot(tab, aes(NMDS1, NMDS2, colour = class)) +
+    geom_point() + stat_ellipse(type = "t", level = .8) + theme_classic()
+  #ggsave("fig_nmds_by_class.png", p3, width = 6, height = 5, dpi = 300)
+  
+## 5.8: test for continuous dispersion without the bins ------------------------
+  
+  ## Idea: fit the "expected" composition at each canopy-loss level (plus Site), then
+  ## measure how far each subplot sits from its own expected position. Those residual
+  ## distances are a continuous version of betadisper that no longer mixes up
+  ## "composition shifts along the gradient" with "sites get more/less variable".
+  ## (dist_global in section 6 does mix them: a subplot can be far from the global
+  ## centroid just because the mean moved.)
+  resid_dispersion <- function(d, cols, trans = sqrt, deg = 2) {
+    Y <- as.matrix(d[, cols]); rownames(Y) <- d$key
+    keep <- rowSums(Y) > 0
+    Y <- Y[keep, , drop = FALSE]; d <- d[keep, ]
+    n  <- nrow(Y)
+    bc <- vegdist(trans(Y), method = "bray")
+    ## PCoA coordinates with a Cailliez correction so every axis is real. Bray-Curtis
+    ## produces many negative eigenvalues; just dropping those axes gave a noticeably
+    ## more extreme result for woody seeds, so don't do that here.
+    P  <- suppressWarnings(cmdscale(bc, k = n - 2, add = TRUE)$points)
+    rhs <- if (nlevels(droplevels(d$Site)) > 1) "Site + poly(canopy_loss, deg)" else "poly(canopy_loss, deg)"
+    fit <- lm(as.formula(paste("P ~", rhs)), data = d)
+    R   <- residuals(fit)
+    p   <- nrow(coef(fit))                                   # number of fitted terms
+    d$resid_dist <- sqrt(rowSums(R^2)) * sqrt(n / (n - p))   # small-sample correction
+    list(data = d, bc = bc)
+  }
+  
+  rd_w <- resid_dispersion(dat, woody_cols)$data
+  rd_h <- resid_dispersion(dat, herb_cols)$data
+  rd_t <- resid_dispersion(filter(dat, Site == "TFO"), woody_cols)$data
+  
+  for (nm in c("rd_w", "rd_h", "rd_t")) {
+    x <- get(nm)
+    cat("\n", nm, "\n")
+    print(cor.test(x$canopy_loss, x$resid_dist, method = "spearman", exact = FALSE))
+  }
+  
+  ## Formal test: linear slope + smooth, with plot as a random effect
+  ## (a negative canopy_loss coefficient = dispersion falls with disturbance)
+  m_lin <- mgcv::gam(resid_dist ~ canopy_loss + Site + s(plot_id, bs = "re"),
+               family = Gamma(link = "log"), data = rd_w, method = "REML")
+  summary(m_lin)
+  m_sm  <- mgcv::gam(resid_dist ~ s(canopy_loss, k = 5) + Site + s(plot_id, bs = "re"),
+               family = Gamma(link = "log"), data = rd_w, method = "REML")
+  summary(m_sm); plot(m_sm, select = 1, shade = TRUE)
+  ## repeat m_lin with data = rd_h for herbaceous
+  
+  ## Moving-window beta diversity (descriptive only): mean pairwise Bray-Curtis among
+  ## the k subplots closest in canopy loss to each focal subplot. Windows overlap,
+  ## so don't put a p-value on this -- use it to see the SHAPE of the relationship.
+  window_bd <- function(d, bc, k = 20) {
+    bcm <- as.matrix(bc)
+    sapply(seq_len(nrow(d)), function(i) {
+      idx <- order(abs(d$canopy_loss - d$canopy_loss[i]))[seq_len(k)]
+      m <- bcm[idx, idx]; mean(m[lower.tri(m)])
+    })
+  }
+  tab$window_bc <- window_bd(res_woody$data, res_woody$bc, k = 20)
+  p4 <- ggplot(tab, aes(canopy_loss, window_bc)) +
+    geom_point(aes(colour = Site)) + geom_smooth(method = "loess", se = TRUE, colour = "black") +
+    labs(x = "Canopy loss (%)", y = "Mean pairwise Bray-Curtis in 20-subplot window") +
+    theme_classic()
+  #ggsave("fig_moving_window_bd.png", p4, width = 6, height = 4, dpi = 300)
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
     
