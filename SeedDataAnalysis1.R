@@ -554,7 +554,7 @@ Pie.df <- ExpCounts |>
 # check to be sure all the subplots are labelled correctly
 stopifnot(all(grepl("^(RBP|TFO)_[0-9]{4}$", LongCounts$SiteQuad)))
   
-# create key column 
+# create key column with all Site, Quad, and Plot info
   LongCounts <- LongCounts |> 
     mutate( 
       key = paste(SiteQuad, Plot, sep = "_")
@@ -604,11 +604,21 @@ stopifnot(all(grepl("^(RBP|TFO)_[0-9]{4}$", LongCounts$SiteQuad)))
            plot_id = factor(plot_id),
            Site    = factor(Site))
   
+  dat.tfo <- dat |> 
+    filter(Site == "TFO")
+  
   ## 5.3: Analysis Function ---------------------------------------------------- 
   
   run_analysis <- function(d, cols, label, trans = sqrt) {
     
-    ## output: 
+    ## inputs: 
+      # d     = dataframe with columns key (unique subplot ID), class (canopy 
+      #         loss category), plot_id, and canopy_loss (continuous)
+      # cols  = which columns to run the function on 
+      # label = what to call this analysis
+      # trans = transformation to apply, sqrt by default
+    
+    ## outputs: 
       # Mean distance to centroid for each canopy loss class 
       # permutation test to see if spreads differ 
       # tukeyHSD test for which sets of classes differ 
@@ -618,36 +628,109 @@ stopifnot(all(grepl("^(RBP|TFO)_[0-9]{4}$", LongCounts$SiteQuad)))
       # NMDS block
     
     
+    # SETUP 
+      ## put species into a matrix (Y), drop subplots with no abundance (no abun
+      ## is undefined for bray curtis) 
+      ## drop unused canopy classes 
+      ## compute Bray-curtis dissimilarity matrix on sqrt transed data
+          
     
     cat("\n=====", label, "=====\n")
-    Y    <- as.matrix(d[, cols]); rownames(Y) <- d$key
+    # create species matrix
+    Y    <- as.matrix(d[, cols]) 
+    
+    # name rows by their plot ID key
+    rownames(Y) <- d$key
+    
+    # drop rows with no abundance to avoid undefined BC
     keep <- rowSums(Y) > 0 
-    Y    <- Y[keep, , drop = FALSE]; d <- d[keep, ]
+    Y    <- Y[keep, , drop = FALSE]
+    d    <- d[keep, ]
+    
+    # remove factors with no data to prevent weird centroid calcs
     cls  <- droplevels(d$class)
     pid  <- droplevels(d$plot_id)
     
+    # apply transformation to abundances, then compute B-C dissimilarity between
+    # every pair of subplots. sqrt transform keps overabundant species don't 
+    # dominate dissimilarity calcs
     bc   <- vegdist(trans(Y), method = "bray")
     
     # (A) dispersion by canopy class 
+    ## QUESTION: within each canopy class, how variable are communities?
+    
+    print("SECTION A: DISPERSION BY CANOPY CLASS (centroid)")
+    
+    # betadisper to: 
+      ## (1) take dissimilarity matrix and convert it into a PCoA so every plot 
+      ##     becomes a multivariate point
+      ## (2) find centroid of each class 
+      ## (3) measure how far each subplot sits from centroid of its own class
     bd <- betadisper(bc, cls, type = "centroid") 
+    
+    # print results of betadisper (mean centroid distance for each class)
     cat("Mean distance to class centroid: \n"); 
     print(round(tapply(bd$distances, cls, mean), 3))
     
-    ## permute whole plots because canopy loss is not independent between them 
+    print("test for significance of class-distance to centroid")
     
+    ## permute whole plots because canopy loss is not independent between them
+    
+    ## how() is a permute function that tells vegan what kinds of shuffling are
+    ## allowed for a permuttest. it takes three inputs: nperm (number of times
+    ## to shuffle), plots (how to shuffle at plot level), and within (how to
+    ## shuffle within plots) 
+    
+    # the following code creates a how design object allowing plots to be 
+    # shuffled freely, but subplots (specific seed traps) within them not to be
     ctrl <- how(
       nperm  = 9999, 
       plots  = Plots(strata = pid, type = "free"), 
       within = Within(type = "none")
     )
+    
+    # permute test runs an ANOVA on distances to centroid and computes F-statistic
+    # and p-valye. p <= 0.05 means at least one class differs from the others
     print(permutest(bd, permutations = ctrl))
+    
+    # Tukey HSD asks which pairs actually differ, and by how much 
+    # fits an ANOVA to centroid distances, then compars every pair of class 
+    # means. 
     print(TukeyHSD(bd))
     
     # (B) continuous measures 
+    # QUESTION: As canpopy loss increases continuously, do subplots become more
+    #           or less compositionally unusual?
     
+    print("SECTION B: Continuous Measures")
+    
+    # redo betadisper but with a dummy group called "all" (so we're computing the
+    # centroid distance for every subplot at once)
     d$dist_global <- betadisper(bc, factor(rep("all", nrow(Y))))$distances
+    
+    # LCBD = Local Contrabution to Beta Diversity (Legendre and De Caceres, 2013)
+    # Steps: 
+    # (1) transforms abundances with hellinger method (sqrt of each species' 
+    #     relative abundance within each subplot) 
+    # (2) measures each site's deviation by summing squared differences between 
+    #     subplot values and average value for each species (sum of squares)
+    # (3) total beta-div = sum of all those values across all sites 
+    # (4) LCBD is each site's share of the total (i.e., a subplot with LCBD = 0.08 
+    #     accounts for 8% of the dataset's compositional variation) 
+    
+    # to interpret: high LCBD means the subplot has an unusual community and 
+    # contributes highly to overrall beta-div
+    # NOTE: LCBD is more sensitive to outliers
     d$LCBD        <- beta.div(Y, method = "hellinger", nperm = 999)$LCBD
     
+    # correlate canopy loss and betadisper/LCBD 
+    # output = Rho value, p-value 
+      # Rho: negative means as canopy loss increases, plots get closer to the
+      #      centroid center and begin to homogenize
+      #      positive means that as canopy loss increases, plots become more 
+      #      unique 
+    # NOTE: p-value here assumes independence for each subplot, which isn't the
+    #       case. treat significance with caution. 
     print(cor.test(d$canopy_loss, d$dist_global, 
                    method = "spearman", 
                    exact  = FALSE))
@@ -656,24 +739,60 @@ stopifnot(all(grepl("^(RBP|TFO)_[0-9]{4}$", LongCounts$SiteQuad)))
                    exact  = FALSE))
     
     ## (C) mean pairwise Bray-Curtis within each class (direct beta diversity)
+    # QUESTION: within each canopy class, how variable are communities when 
+    #           measured directly (as opposed to indirectly via dist to centroid)
+    
+    # necessary because a centroid is an abstraction that may or may not rep
+    # the real world. Mean pairwise dissimilarity does not use ordination and
+    # acts as a robustness check; if it agrees with the centroid based results, 
+    # conclusion doesn't depend on how dispersion was calced
+    
+    print("SECTION C: DISPERSION BY CANOPY CLASS (direct)")
+    
+    # turn bc from a lower triangle into a full matrix so it can be indexed by
+    # row and column
     bcm <- as.matrix(bc)
+    
+    # run the following function once per class:
     pw  <- sapply(levels(cls), function(k) {
+      
+      # choose only subplots in class k
       i <- which(cls == k)
+      
+      # remove results with only 1 or 2 subplots, as the mean pairwise value 
+      # would only be coming from onw calc
       if (length(i) < 3) return(NA_real_)
-      m <- bcm[i, i]; mean(m[lower.tri(m)])
+      
+      # extract submatrix containing only rows/columns for this class's subplots
+      m <- bcm[i, i] 
+      
+      # calculate mean of this pairwise similarity
+      mean(m[lower.tri(m)])
     })
     cat("Mean pairwise BC within class:\n"); print(round(pw, 3))
     
     ## (D) NMDS, to check what Figure 4's NMDS1 actually captures
+    
+    print("SECTION D: NMDS stress")
+    
+    # create a two axis nMDS of the dissimilarity matrix
     nm      <- metaMDS(bc, k = 2, trymax = 50, trace = 0)
+    #save nMDS coordinates
     d$NMDS1 <- nm$points[, 1]; d$NMDS2 <- nm$points[, 2]
     
+    # report the nMDS stress
     cat("NMDS stress:", round(nm$stress, 3), "\n")
+    
+    # correlate the axes (NMDS1 and 2) with canopy loss 
+    # again, high rho =  axis tracks canopy loss gradient well; small rho 
+    # means axis does not
     cat("Spearman NMDS1~canopy:",
         round(cor(d$canopy_loss, d$NMDS1, method = "spearman"), 2),
         "| NMDS2~canopy:", 
         round(cor(d$canopy_loss, d$NMDS2, method = "spearman"), 2),
         "\n")
+    
+    # calculate standard deviation of nMDS coordinates within each canopy class
     cat("SD of NMDS1 by class:\n"); print(round(tapply(d$NMDS1, cls, sd), 3))
     
     invisible(list(data = d, bc = bc, bd = bd))
@@ -684,6 +803,8 @@ stopifnot(all(grepl("^(RBP|TFO)_[0-9]{4}$", LongCounts$SiteQuad)))
                             "WOODY, all sites")
   res_herb  <- run_analysis(dat, herb_cols,  
                             "HERBACEOUS (unknowns excluded), all sites")
+  res_all.tfo <- run_analysis(dat.tfo, c(woody_cols, herb_cols), 
+                              "All species, TFO only")
   res_all   <- run_analysis(dat, c(woody_cols, herb_cols), 
                             "All species")
   
@@ -710,60 +831,89 @@ stopifnot(all(grepl("^(RBP|TFO)_[0-9]{4}$", LongCounts$SiteQuad)))
 ## 5.6: Modelling continuous gradient ------------------------------------------ 
   
   ### WOODY --------------------------------------------------------------------
-  tab         <- res_woody$data
-  tab$plot_id <- factor(tab$plot_id)
+  
+  tab.w         <- res_woody$data
+  tab.w$plot_id <- factor(tab.w$plot_id)
   m1 <- mgcv::gam(dist_global ~ s(canopy_loss, k = 5) + 
                   Site + s(plot_id, bs = "re"),
-                  data = tab, method = "REML")
+                  data = tab.w, method = "REML")
   
   summary(m1)       # plot random effect handles subplots nested in plots
   
   m2 <- mgcv::gam(LCBD ~ s(canopy_loss, k = 5) + 
                   Site + s(plot_id, bs = "re"),
-                  data = tab, method = "REML")
+                  data = tab.w, method = "REML")
   
   summary(m2)
   
   ## PERMANOVA for centroid shifts (report alongside betadisper)
   bc_w <- res_woody$bc
   ctrl <- how(nperm  = 9999, 
-              plots  = Plots(strata = tab$plot_id, type = "free"),
+              plots  = Plots(strata = tab.w$plot_id, type = "free"),
               within = Within(type = "none"))
   
   adonis2(bc_w ~ Site + canopy_loss, 
-          data         = tab, 
+          data         = tab.w, 
           permutations = ctrl, 
           by           = "terms")
  
   ### ALL ----------------------------------------------------------------------
-  tab         <- res_all$data
-  tab$plot_id <- factor(tab$plot_id)
+  tab.a         <- res_all$data
+  tab.a$plot_id <- factor(tab.a$plot_id)
   
   m1 <- mgcv::gam(dist_global ~ s(canopy_loss, k = 5) + 
                   Site + s(plot_id, bs = "re"),
-                  data = tab, method = "REML")
+                  data = tab.a, method = "REML")
   
   summary(m1)       # plot random effect handles subplots nested in plots
   
   m2 <- mgcv::gam(LCBD ~ s(canopy_loss, k = 5) + 
                   Site + s(plot_id, bs = "re"),
-                  data = tab, method = "REML")
+                  data = tab.a, method = "REML")
   
   summary(m2)
   
   ## PERMANOVA for centroid shifts (report alongside betadisper)
   bc_w <- res_all$bc
-  ctrl <- how(nperm = 9999, plots = Plots(strata = tab$plot_id, type = "free"),
+  ctrl <- how(nperm = 9999, plots = Plots(strata = tab.a$plot_id, type = "free"),
               within = Within(type = "none"))
   
   adonis2(bc_w ~ Site + canopy_loss, 
-          data         = tab, 
+          data         = tab.a, 
           permutations = ctrl, 
           by           = "terms")
-
-## 5.7: Figures ---------------------------------------------------------------- 
   
-  DispVsCanopy_wood <- ggplot(tab, aes(canopy_loss, dist_global, colour = Site)) +
+  ### TFO ----------------------------------------------------------------------
+  tab.t         <- res_all.tfo$data
+  tab.t$plot_id <- factor(tab.t$plot_id)
+  
+  m1 <- mgcv::gam(dist_global ~ s(canopy_loss, k = 5) + 
+                  s(plot_id, bs = "re"),
+                  data = tab.t, method = "REML")
+  
+  summary(m1)       # plot random effect handles subplots nested in plots
+  
+  m2 <- mgcv::gam(LCBD ~ s(canopy_loss, k = 5) + 
+                  s(plot_id, bs = "re"),
+                  data = tab.t, method = "REML")
+  
+  summary(m2)
+  
+  ## PERMANOVA for centroid shifts (report alongside betadisper)
+  bc_t <- res_all.tfo$bc
+  ctrl <- how(nperm = 9999, plots = Plots(strata = tab.t$plot_id, type = "free"),
+              within = Within(type = "none"))
+  
+  adonis2(bc_t ~ Site + canopy_loss, 
+          data         = tab.t, 
+          permutations = ctrl, 
+          by           = "terms")
+  
+  
+## 5.7: Figures ----------------------------------------------------------------
+  
+  ###  WOODY -------------------------------------------------------------------
+  DispVsCanopy_wood <- ggplot(tab.w, aes(canopy_loss, dist_global, colour = Site)) +
     geom_point(alpha = .7) +
     geom_smooth(aes(group = 1), 
                 method  = "gam", 
@@ -774,20 +924,33 @@ stopifnot(all(grepl("^(RBP|TFO)_[0-9]{4}$", LongCounts$SiteQuad)))
     theme_classic()
   #ggsave("fig_dispersion_vs_canopy.png", p1, width = 6, height = 4, dpi = 300)
   
-  CentroidBP_wood <- ggplot(tab, aes(class, dist_global)) +
+  CentroidBP_wood <- ggplot(tab.w, aes(class, dist_global)) +
     geom_boxplot(outlier.shape = NA) + 
     geom_jitter(aes(colour = Site), width = .15, alpha = .6) +
-    labs(x = "Canopy loss class (%)", y = "Distance to centroid") + 
+    labs(x = "Canopy loss class (%)", y = "Distance to centroid (Bray-Curtis)") + 
     theme_classic()
   #ggsave("fig_centroid_boxplot.png", p2, width = 6, height = 4, dpi = 300)
   
-  ClassNMDS_wood <- ggplot(tab, aes(NMDS1, NMDS2, colour = class)) +
+  ClassNMDS_wood <- ggplot(tab.w, aes(NMDS1, NMDS2, colour = class)) +
     geom_point() + 
     stat_ellipse(type = "t", level = .8) + 
+    scale_color_manual(
+      values = c("0-10"  = "lightgreen",
+                 "10-20" = "#ffbf00",
+                 "20-30" = "#ff7b00",
+                 "30+"   = "red")
+    ) +
     theme_classic()
   #ggsave("fig_nmds_by_class.png", p3, width = 6, height = 5, dpi = 300)
   
-  DispVsCanopy_all <- ggplot(tab, aes(canopy_loss, dist_global, colour = Site)) +
+  ContNMDS_wood <- ggplot(tab.w, aes(NMDS1, NMDS2, colour = Percent_Lost)) +
+    geom_point(size = 2) + 
+    scale_color_gradient(low = "lightgreen", high = "red") +
+    theme_classic()
+  
+  
+  ### ALL ----------------------------------------------------------------------
+  DispVsCanopy_all <- ggplot(tab.a, aes(canopy_loss, dist_global, colour = Site)) +
     geom_point(alpha = .7) +
     geom_smooth(aes(group = 1), 
                 method  = "gam", 
@@ -798,19 +961,65 @@ stopifnot(all(grepl("^(RBP|TFO)_[0-9]{4}$", LongCounts$SiteQuad)))
     theme_classic()
   #ggsave("fig_dispersion_vs_canopy.png", p1, width = 6, height = 4, dpi = 300)
   
-  CentroidBP_all <- ggplot(tab, aes(class, dist_global)) +
+  CentroidBP_all <- ggplot(tab.a, aes(class, dist_global)) +
     geom_boxplot(outlier.shape = NA) + 
     geom_jitter(aes(colour = Site), width = .15, alpha = .6) +
-    labs(x = "Canopy loss class (%)", y = "Distance to centroid") + 
+    labs(x = "Canopy loss class (%)", y = "Distance to centroid (Bray-Curtis") + 
     theme_classic()
   #ggsave("fig_centroid_boxplot.png", p2, width = 6, height = 4, dpi = 300)
   
-  ClassNMDS_all <- ggplot(tab, aes(NMDS1, NMDS2, colour = class)) +
+  ClassNMDS_all <- ggplot(tab.a, aes(NMDS1, NMDS2, colour = class)) +
     geom_point() + 
     stat_ellipse(type = "t", level = .8) + 
+    scale_color_manual(
+      values = c("0-10"  = "lightgreen",
+                 "10-20" = "#ffbf00",
+                 "20-30" = "#ff7b00",
+                 "30+"   = "red")
+    ) +
     theme_classic()
   #ggsave("fig_nmds_by_class.png", p3, width = 6, height = 5, dpi = 300)
   
+  ContNMDS_all <- ggplot(tab.a, aes(NMDS1, NMDS2, colour = Percent_Lost)) +
+    geom_point(size = 2) + 
+    scale_color_gradient(low = "lightgreen", high = "red") +
+    theme_classic()
+  
+  ### TFO ----------------------------------------------------------------------
+  DispVsCanopy_tfo <- ggplot(tab.t, aes(canopy_loss, dist_global)) +
+    geom_point(alpha = .7) +
+    geom_smooth(aes(group = 1), 
+                method  = "gam", 
+                formula = y ~ s(x, k = 5), 
+                colour  = "black") +
+    labs(x = "Canopy loss (%)", 
+         y = "Distance to centroid (Bray-Curtis, sqrt counts)") +
+    theme_classic()
+  #ggsave("fig_dispersion_vs_canopy.png", p1, width = 6, height = 4, dpi = 300)
+  
+  CentroidBP_tfo <- ggplot(tab.t, aes(class, dist_global)) +
+    geom_boxplot(outlier.shape = NA) + 
+    geom_jitter(width = .15, alpha = .6) +
+    labs(x = "Canopy loss class (%)", y = "Distance to centroid (Bray-Curtis") + 
+    theme_classic()
+  #ggsave("fig_centroid_boxplot.png", p2, width = 6, height = 4, dpi = 300)
+  
+  ClassNMDS_tfo <- ggplot(tab.t, aes(NMDS1, NMDS2, colour = class)) +
+    geom_point() + 
+    stat_ellipse(type = "t", level = .8) + 
+    scale_color_manual(
+      values = c("0-10"  = "lightgreen",
+                 "10-20" = "#ffbf00",
+                 "20-30" = "#ff7b00",
+                 "30+"   = "red")
+    ) +
+    theme_classic()
+  #ggsave("fig_nmds_by_class.png", p3, width = 6, height = 5, dpi = 300)
+  
+  ContNMDS_tfo <- ggplot(tab.t, aes(NMDS1, NMDS2, colour = Percent_Lost)) +
+    geom_point(size = 2) + 
+    scale_color_gradient(low = "lightgreen", high = "red") +
+    theme_classic()
   
 ## 5.8: test for continuous dispersion without the bins ------------------------
   
@@ -843,7 +1052,7 @@ stopifnot(all(grepl("^(RBP|TFO)_[0-9]{4}$", LongCounts$SiteQuad)))
   rd_w <- resid_dispersion(dat, woody_cols)$data
   rd_h <- resid_dispersion(dat, herb_cols)$data
   rd_a <- resid_dispersion(dat, c(woody_cols, herb_cols))$data
-  rd_t <- resid_dispersion(filter(dat, Site == "TFO"), woody_cols)$data
+  rd_t <- resid_dispersion(filter(dat, Site == "TFO"), c(woody_cols, herb_cols))$data
   
   for (nm in c("rd_w", "rd_h", "rd_t")) {
     x <- get(nm)
@@ -875,9 +1084,9 @@ stopifnot(all(grepl("^(RBP|TFO)_[0-9]{4}$", LongCounts$SiteQuad)))
   
   summary(m_sm); plot(m_sm, select = 1, shade = TRUE)
   
-  tab$window_bc <- window_bd(res_woody$data, res_woody$bc, k = 20)
+  tab.w$window_bc <- window_bd(res_woody$data, res_woody$bc, k = 20)
   
-  MovingWindowBC_wood <- ggplot(tab, aes(canopy_loss, window_bc)) +
+  MovingWindowBC_wood <- ggplot(tab.w, aes(canopy_loss, window_bc)) +
     geom_point(aes(colour = Site)) + 
     geom_smooth(method = "loess", se = TRUE, colour = "black") +
     labs(x = "Canopy loss (%)", 
@@ -905,16 +1114,43 @@ stopifnot(all(grepl("^(RBP|TFO)_[0-9]{4}$", LongCounts$SiteQuad)))
   ## the k subplots closest in canopy loss to each focal subplot. Windows overlap,
   ## so don't put a p-value on this -- use it to see the SHAPE of the relationship.
   
-  tab$window_bc <- window_bd(res_all$data, res_all$bc, k = 20)
+  tab.a$window_bc <- window_bd(res_all$data, res_all$bc, k = 20)
   
-  MovingWindowBC_all <- ggplot(tab, aes(canopy_loss, window_bc)) +
+  MovingWindowBC_all <- ggplot(tab.a, aes(canopy_loss, window_bc)) +
     geom_point(aes(colour = Site)) + 
     geom_smooth(method = "loess", se = TRUE, colour = "black") +
     labs(x = "Canopy loss (%)", 
          y = "Mean pairwise Bray-Curtis in 20-subplot window") +
     theme_classic()
   #ggsave("fig_moving_window_bd.png", p4, width = 6, height = 4, dpi = 300)
+
+### TFO ------------------------------------------------------------------------  
+  ## Formal test: linear slope + smooth, with plot as a random effect
+  ## (a negative canopy_loss coefficient = dispersion falls with disturbance)
+  m_lin <- mgcv::gam(resid_dist ~ canopy_loss + s(plot_id, bs = "re"),
+                     family = Gamma(link = "log"), data = rd_t, method = "REML")
+  
+  summary(m_lin)
+  
+  m_sm  <- mgcv::gam(resid_dist ~ s(canopy_loss, k = 5) + 
+                     s(plot_id, bs = "re"),
+                     family = Gamma(link = "log"), data = rd_t, method = "REML")
+  
+  summary(m_sm); plot(m_sm, select = 1, shade = TRUE)
   
   
+  ## Moving-window beta diversity (descriptive only): mean pairwise Bray-Curtis among
+  ## the k subplots closest in canopy loss to each focal subplot. Windows overlap,
+  ## so don't put a p-value on this -- use it to see the SHAPE of the relationship.
+  
+  tab.t$window_bc <- window_bd(res_all.tfo$data, res_all.tfo$bc, k = 20)
+  
+  MovingWindowBC_tfo <- ggplot(tab.t, aes(canopy_loss, window_bc)) +
+    geom_point() +  
+    geom_jitter() +
+    geom_smooth(method = "loess", se = TRUE, colour = "black") +
+    labs(x = "Canopy loss (%)", 
+         y = "Mean pairwise Bray-Curtis in 20-subplot window") +
+    theme_classic()  
   
   
