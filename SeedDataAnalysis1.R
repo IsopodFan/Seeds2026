@@ -812,34 +812,76 @@ stopifnot(all(grepl("^(RBP|TFO)_[0-9]{4}$", LongCounts$SiteQuad)))
 ## 5.5: Confound checks -------------------------------------------------------- 
   # I'm tired of typing this out
 
+  # put woody species into columns and convert to numeric matrix w/ one row per
+  # subplot and one column per species
   Yw                 <- as.matrix(dat[, woody_cols])
+  
+  # sum across each row to give total num of woody seeds in each subplot
   dat$total_woody    <- rowSums(Yw)
+  
+  # create a column representing species richness (# of woody species)
   dat$richness_woody <- rowSums(Yw > 0)
-  print(dat %>% group_by(class) %>%
+  
+  # create table for each canopy class 
+  print(dat |>  group_by(class) |> 
           summarise(n        = n(), 
                     seeds    = mean(total_woody), 
                     richness = mean(richness_woody)))
   
   ## Presence/absence: if dispersion is flat here but not with abundances,
   ## the pattern is driven by abundance, not species turnover
-  bc_pa <- vegdist(Yw > 0, method = "jaccard", binary = TRUE)
-  bd_pa <- betadisper(bc_pa, dat$class, type = "centroid")
+  
+  # create an presence/absence version of the species matrix, then compute 
+  # Jaccard dissimilarity, ranging from 0 (same spec list) to 1 (no in common 
+  # species)
+  jacc_pa <- vegdist(Yw > 0, method = "jaccard", binary = TRUE)
+  # same betadisper from before, PCoA on distance matrix, find each class 
+  # centroid, measure each subplot distance to class centroid
+  jacc_pa <- betadisper(jacc_pa, dat$class, type = "centroid")
   
   cat("\nJaccard (presence/absence) distance to centroid:\n")
-  print(round(tapply(bd_pa$distances, dat$class, mean), 3))
+  print(round(tapply(jacc_pa$distances, dat$class, mean), 3))
+  
+  # dispersion *is* pretty flat, so it looks like the trends are beign driven by
+  # abundance
   
 ## 5.6: Modelling continuous gradient ------------------------------------------ 
+  ## Goals: 
+    # (1) account for independence assumption inherent in cor.test(), given that
+    #     our subplots not independent of one another 
+    # (2) GAMS retest relationships between canopy loss and dist_global/LCBD, 
+    #     this time accounting for plot structure/site allowing curved 
+    #     relationships 
+    # (3) PERMANOVA (adonis2) asks if the average community composition
+    #     (centroid) shifts with canopy loss as opposed to spread around the 
+    #     centroid
+  
   
   ### WOODY --------------------------------------------------------------------
   
+  # pull data out of run_analysis results  
   tab.w         <- res_woody$data
+  #make plot_id a factor
   tab.w$plot_id <- factor(tab.w$plot_id)
+  
+  # perfrom a GAM (generalized additive model)-- like a regression, but instead
+  # of forcing a linear line, it allows a flexible curve
+    # canopy loss is the smooth term/what the curve will be fit to 
+    # Site = fixed affect, canopy loss effect estimated *after* accounting for 
+    #        baseline differences between sites 
+    # A random offset is added because subplots are not independent, and treating
+    # them as such would be pseudoreplication.Each plot gets a specific offset 
+    # based on plot-wide trends
+  
   m1 <- mgcv::gam(dist_global ~ s(canopy_loss, k = 5) + 
                   Site + s(plot_id, bs = "re"),
                   data = tab.w, method = "REML")
   
   summary(m1)       # plot random effect handles subplots nested in plots
+  # shows that sites differ from each other significantly
   
+  
+  # repeat the same model, but this time with LCBD
   m2 <- mgcv::gam(LCBD ~ s(canopy_loss, k = 5) + 
                   Site + s(plot_id, bs = "re"),
                   data = tab.w, method = "REML")
@@ -1152,5 +1194,86 @@ stopifnot(all(grepl("^(RBP|TFO)_[0-9]{4}$", LongCounts$SiteQuad)))
     labs(x = "Canopy loss (%)", 
          y = "Mean pairwise Bray-Curtis in 20-subplot window") +
     theme_classic()  
+
+# 5.9: Evenness ----------------------------------------------------------------
+ 
+  # convert to species matrix
+  Ya <- as.matrix(tab.a[, c(woody_cols, herb_cols)])
+  # find number of species per row (subplot)
+  S  <- rowSums(Ya > 0)
   
+  # calculate evenness for each subplot with 2 or more species
+  tab.a$evenness <- ifelse(S >= 2, vegan::diversity(Ya, "shannon") / log(S), NA)
+  
+  EvenVsCanopy_all <- ggplot(tab.a, aes(canopy_loss, evenness, colour = Site)) +
+    geom_point(alpha = .7) +
+    geom_smooth(aes(group = 1),
+                method  = "gam",
+                formula = y ~ s(x, k = 5),
+                colour  = "black") +
+    labs(x = "Canopy loss (%)",
+         y = "Pielou's evenness (J)") +
+    theme_classic()
+  
+  EvenBP_all <- ggplot(tab.a, aes(class, evenness)) +
+    geom_boxplot(outlier.shape = NA) + 
+    geom_jitter(aes(colour = Site), width = .15, alpha = .6) +
+    labs(x = "Canopy loss class (%)", y = "Pielou's evenness (J)") + 
+    theme_classic()
+
+  window_even <- function(d, cols, k = 20, pooled = FALSE) {
+    Y <- as.matrix(d[, cols])
+    S <- rowSums(Y > 0)
+    J <- ifelse(S >= 2, vegan::diversity(Y, "shannon") / log(S), NA_real_)
+    
+    sapply(seq_len(nrow(d)), function(i) {
+      idx <- order(abs(d$canopy_loss - d$canopy_loss[i]))[seq_len(k)]
+      
+      if (pooled) {
+        pc <- colSums(Y[idx, , drop = FALSE])
+        Sp <- sum(pc > 0)
+        if (Sp < 2) NA_real_ else vegan::diversity(pc, "shannon") / log(Sp)
+      } else {
+        mean(J[idx], na.rm = TRUE)
+      }
+    })
+  }
+  
+  tab.a$window_even <- window_even(res_all$data, c(woody_cols, herb_cols), 
+                                   k = 20)
+
+  MovingWindowEven_all <- ggplot(tab.a, aes(canopy_loss, window_even)) +
+    geom_point() +
+    geom_smooth(method = "loess", se = TRUE, colour = "black") +
+    labs(x = "Canopy loss (%)",
+         y = "Mean Pielou's evenness in 20-subplot window") +
+    theme_classic()
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+
   
